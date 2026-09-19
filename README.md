@@ -12,7 +12,7 @@ FastAPI service that collects Japanese news from RSS feeds and stores only the t
 | `GET /articles/{id}` | One article, 404 if missing |
 | `POST /admin/collect` | Run a collection now; needs header `X-API-Key: $ADMIN_KEY` (always 403 if `ADMIN_KEY` is empty) |
 
-Interactive docs: `/docs`.
+Interactive docs: `/docs`. A small static test page (source/keyword/since filters, paging) is served at `/test/`.
 
 ## Configuration (environment variables)
 

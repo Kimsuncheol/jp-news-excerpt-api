@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY alembic.ini .
 COPY alembic alembic
 COPY app app
+COPY static static
 
 RUN useradd --system --uid 1000 app && chown app /app
 USER app

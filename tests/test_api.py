@@ -68,3 +68,12 @@ def test_admin_collect_403_when_key_unset(api: TestClient, monkeypatch: pytest.M
     monkeypatch.setattr(config, "ADMIN_KEY", "")
     assert api.post("/admin/collect").status_code == 403
     assert api.post("/admin/collect", headers={"X-API-Key": ""}).status_code == 403
+
+
+def test_static_test_page_served(api: TestClient) -> None:
+    resp = api.get("/test/")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    assert "News Excerpt API Test Page" in resp.text
+    assert api.get("/test", follow_redirects=False).status_code in (301, 307)
+    assert api.get("/test/missing.js").status_code == 404

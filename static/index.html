@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>News Excerpt API Test Page</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  form { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .5rem; margin: 1rem 0; }
+  label { display: flex; flex-direction: column; font-size: .85rem; }
+  input, select, button { font: inherit; padding: .35rem; }
+  #health { padding: .1rem .5rem; border-radius: 1rem; background: #ddd; }
+  #health.ok { background: #c8f0c8; } #health.bad { background: #f5c6c6; }
+  article { border-top: 1px solid #ccc; padding: .75rem 0; }
+  article h2 { font-size: 1.05rem; margin: 0; }
+  small { color: #555; }
+  #status { color: #555; }
+</style>
+</head>
+<body>
+<h1>News Excerpt API <span id="health">health: …</span></h1>
+<p>Test page served by the API itself. Endpoints: <a href="/docs">/docs</a>.</p>
+
+<form id="filters">
+  <label>source <select name="source"><option value="">(all)</option></select></label>
+  <label>q <input name="q" placeholder="keyword"></label>
+  <label>since <input name="since" type="datetime-local"></label>
+  <label>limit <input name="limit" type="number" min="1" max="100" value="20"></label>
+  <button type="submit">Search</button>
+</form>
+<p id="status"></p>
+<div id="results"></div>
+<p><button id="prev" type="button">Previous</button> <button id="next" type="button">Next</button></p>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const form = $("filters");
+let offset = 0, total = 0;
+
+async function getJSON(path) {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(path + " -> HTTP " + res.status);
+  return res.json();
+}
+
+async function init() {
+  try {
+    await getJSON("/health");
+    $("health").textContent = "health: ok"; $("health").className = "ok";
+  } catch { $("health").textContent = "health: down"; $("health").className = "bad"; }
+  try {
+    for (const name of await getJSON("/sources")) form.source.add(new Option(name, name));
+  } catch (e) { $("status").textContent = String(e); }
+  search(0);
+}
+
+async function search(newOffset) {
+  offset = Math.max(0, newOffset);
+  const params = new URLSearchParams({ limit: form.limit.value || "20", offset });
+  if (form.source.value) params.set("source", form.source.value);
+  if (form.q.value) params.set("q", form.q.value);
+  if (form.since.value) params.set("since", new Date(form.since.value).toISOString());
+  try {
+    const data = await getJSON("/articles?" + params);
+    total = data.total;
+    $("status").textContent = `${total} article(s), showing ${data.items.length} from offset ${offset}`;
+    render(data.items);
+  } catch (e) { $("status").textContent = String(e); render([]); }
+}
+
+function render(items) {
+  const box = $("results");
+  box.replaceChildren();
+  for (const a of items) {
+    const el = document.createElement("article");
+    const h = document.createElement("h2");
+    const link = document.createElement("a");
+    link.textContent = a.title;
+    link.href = /^https?:\/\//.test(a.link) ? a.link : "#";
+    link.target = "_blank"; link.rel = "noopener noreferrer";
+    h.append(link);
+    const meta = document.createElement("small");
+    meta.textContent = `${a.source} · ${a.published_at ? new Date(a.published_at).toLocaleString() : "no date"}`;
+    const p = document.createElement("p");
+    p.textContent = a.summary;
+    el.append(h, meta, p);
+    box.append(el);
+  }
+}
+
+form.addEventListener("submit", (e) => { e.preventDefault(); search(0); });
+$("prev").addEventListener("click", () => search(offset - Number(form.limit.value || 20)));
+$("next").addEventListener("click", () => { const step = Number(form.limit.value || 20); if (offset + step < total) search(offset + step); });
+init();
+</script>
+</body>
+</html>

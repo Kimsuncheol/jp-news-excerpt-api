@@ -7,7 +7,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from pathlib import Path
+
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
@@ -61,6 +64,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="jp-news-excerpt-api", lifespan=lifespan)
+
+
+# Static test page for trying the API in a browser: /test/
+app.mount("/test", StaticFiles(directory=Path(__file__).resolve().parent.parent / "static", html=True), name="test-page")
 
 
 @app.get("/health")
