@@ -1,0 +1,39 @@
+# Render Blueprint. Secrets are never stored here: DATABASE_URL and ADMIN_KEY are entered
+# in the Render dashboard when the Blueprint is first applied (sync: false).
+services:
+  # Only the web service runs migrations (in its build step).
+  - type: web
+    name: jp-news-excerpt-api
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt && alembic upgrade head
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: ENABLE_SCHEDULER
+        value: "false"
+      - key: PYTHON_VERSION
+        value: 3.12.14
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_KEY
+        sync: false
+
+  # Render documents a $1/month minimum per cron job and no free cron plan, so this uses the smallest
+  # documented paid plan. Delete this block to stay fully free (and trigger POST /admin/collect externally).
+  - type: cron
+    name: jp-news-collector
+    runtime: python
+    plan: 0.5c-512mb
+    region: singapore
+    schedule: "*/20 * * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.run_collector
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.14
+      - key: DATABASE_URL
+        sync: false
+      - key: USER_AGENT
+        value: "jp-news-excerpt-api/0.1 (+contact: replace-with-your-contact)"
