@@ -12,3 +12,16 @@ class ArticleOut(BaseModel):
     summary: str
     link: str
     published_at: datetime | None
+
+
+class ArticleList(BaseModel):
+    total: int
+    items: list[ArticleOut]
+
+
+class CollectOut(BaseModel):
+    new_articles: dict[str, int]
+
+
+class ErrorOut(BaseModel):
+    detail: str
