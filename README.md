@@ -81,3 +81,20 @@ Running the collector as its own container (with `ENABLE_SCHEDULER=false` on `ap
 Run that from the host's cron, or add a service with `command: python -m app.run_collector` on a schedule.
 
 Multiple workers: `uvicorn app.main:app --workers 4` (with `ENABLE_SCHEDULER=false`). Migrations run once before the server starts; don't run `alembic upgrade head` from several replicas at the same moment.
+
+## Deploy to Render
+
+`render.yaml` defines a free web service (`jp-news-excerpt-api`, runs migrations at build time) and a cron job (`jp-news-collector`, runs `python -m app.run_collector` every 20 minutes). Note that Render cron jobs are not free (minimum $1/month per cron job); delete the cron block to stay on free services only and trigger `POST /admin/collect` from an external scheduler instead.
+
+1. **Create the external Postgres** (e.g. a Neon project) and copy its connection string. `postgres://...?sslmode=require` is fine; the app rewrites it for psycopg v3.
+2. **Push the repo to GitHub** (make sure no `.env` or `*.db` file is committed; both are in `.gitignore`).
+3. **Create the Blueprint in Render**: Dashboard > New > Blueprint, pick the repository and branch. Render reads `render.yaml` and lists both services.
+4. **Fill in the secrets** Render asks for (they are `sync: false`, so they are never in the repo):
+   - `DATABASE_URL` for both services (the same Postgres connection string).
+   - `ADMIN_KEY` for the web service (any long random string; without it `/admin/collect` always returns 403).
+
+   Also edit `USER_AGENT` on the cron job to include your real contact details.
+5. **Apply** and wait for the first deploy. The web service build runs `alembic upgrade head`; the cron job never runs migrations, so the web service must deploy successfully first.
+6. **Check the first cron run**: open `jp-news-collector` > Logs (or trigger it with "Trigger Run"). Expect lines like `source=nhk new=20` and `new articles: 20`; a run that cannot reach the database exits with code 1 and shows as failed. Then confirm `https://<your-service>.onrender.com/health` returns 200 and `/articles` lists items.
+
+The free web service spins down after 15 minutes without traffic, so the first request after idle takes about a minute.
