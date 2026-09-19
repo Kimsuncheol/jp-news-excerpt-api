@@ -1,0 +1,13 @@
+.git
+.venv
+.venv312
+__pycache__
+*.pyc
+.pytest_cache
+news.db
+tests
+requirements-dev.txt
+pytest.ini
+README.md
+AGENTS.md
+CLAUDE.md

@@ -49,3 +49,10 @@ def test_scheduler_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
         assert job.trigger.interval.total_seconds() == 7 * 60
         assert job.next_run_time is not None
     assert sched.state == STATE_STOPPED
+
+
+def test_scheduler_disabled_by_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "ENABLE_SCHEDULER", False)
+    with TestClient(main.app) as c:
+        assert c.app.state.scheduler is None
+        assert c.get("/health").status_code == 200

@@ -1,121 +1,144 @@
-from collections.abc import Iterator
+from collections.abc import Callable
 from datetime import datetime, timezone
+
+import logging
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import Engine, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import collector
-from app.db import Base
 from app.models import Article, FeedState
+from tests.conftest import FEED_URL, ITEM_A, make_feed
 
-URL = "https://example.com/rss.xml"
-
-
-def rss(items: str, encoding: str = "utf-8") -> bytes:
-    xml = f'<?xml version="1.0" encoding="{encoding}"?><rss version="2.0"><channel><title>x</title>{items}</channel></rss>'
-    return xml.encode(encoding)
+MockClient = Callable[[Callable[[httpx.Request], httpx.Response]], httpx.Client]
 
 
-ITEM = """<item><title>  日本の　<b>ニュース</b> &amp; 天気 </title><link>https://example.com/1</link>
-<description>&lt;p&gt;東京は&lt;br/&gt;晴れ。   明日も&amp;quot;晴れ&amp;quot;。&lt;/p&gt;</description>
-<pubDate>Thu, 01 Jan 2026 09:00:00 +0900</pubDate></item>"""
+def count(db: Session) -> int:
+    return db.scalar(select(func.count()).select_from(Article)) or 0
 
 
-@pytest.fixture
-def db() -> Iterator[Session]:
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    with Session(engine) as s:
-        yield s
+def articles(db: Session) -> dict[str, Article]:
+    return {a.link.rsplit("/", 1)[-1]: a for a in db.scalars(select(Article))}
 
 
-def client_for(handler: httpx.MockTransport) -> httpx.Client:
-    return httpx.Client(transport=handler)
+def test_first_collection_inserts_expected_articles(db: Session, mock_client: MockClient, sample_feed: bytes) -> None:
+    client = mock_client(lambda r: httpx.Response(200, content=sample_feed))
+    assert collector.collect_source(db, client, "nhk", FEED_URL) == 3
+    got = articles(db)
+    assert set(got) == {"a", "b", "c"}
+    assert got["a"].title == "東京で大雪 交通に影響"
+    assert got["a"].source == "nhk"
+    assert got["a"].published_at == datetime(2026, 1, 3, 0, 0, tzinfo=timezone.utc)  # 09:00 JST
+    assert got["c"].summary == "新年おめでとうございます。"
+    assert db.get(FeedState, "nhk").last_error is None
 
 
-def test_collect_cleans_and_stores(db: Session) -> None:
-    c = client_for(httpx.MockTransport(lambda r: httpx.Response(200, content=rss(ITEM), headers={"ETag": '"e1"', "Last-Modified": "Wed, 01 Jan 2026 00:00:00 GMT"})))
-    assert collector.collect_source(db, c, "nhk", URL) == 1
-    a = db.scalars(select(Article)).one()
-    assert a.title == "日本の ニュース & 天気"
-    assert a.summary == '東京は 晴れ。 明日も"晴れ"。'
-    assert a.published_at == datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
-    state = db.get(FeedState, "nhk")
-    assert (state.etag, state.last_error) == ('"e1"', None)
-
-
-def test_dedupe(db: Session) -> None:
-    c = client_for(httpx.MockTransport(lambda r: httpx.Response(200, content=rss(ITEM + ITEM))))
-    assert collector.collect_source(db, c, "nhk", URL) == 1
-    assert collector.collect_source(db, c, "nhk", URL) == 0
-    assert len(db.scalars(select(Article)).all()) == 1
-
-
-def test_summary_truncated(db: Session) -> None:
-    item = f"<item><title>t</title><link>https://e.com/2</link><description>{'あ' * 500}</description></item>"
-    c = client_for(httpx.MockTransport(lambda r: httpx.Response(200, content=rss(item))))
-    collector.collect_source(db, c, "nhk", URL)
-    assert len(db.scalars(select(Article)).one().summary) == 300
-
-
-def test_conditional_request_and_304(db: Session) -> None:
+def test_second_collection_with_304_inserts_nothing(db: Session, mock_client: MockClient, sample_feed: bytes) -> None:
     seen: list[httpx.Headers] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
         seen.append(req.headers)
-        if "if-none-match" in req.headers:
+        if req.headers.get("if-none-match") == '"v1"':
             return httpx.Response(304)
-        return httpx.Response(200, content=rss(ITEM), headers={"ETag": '"e1"', "Last-Modified": "Wed, 01 Jan 2026 00:00:00 GMT"})
+        return httpx.Response(200, content=sample_feed, headers={"ETag": '"v1"', "Last-Modified": "Sat, 03 Jan 2026 00:00:00 GMT"})
 
-    c = client_for(httpx.MockTransport(handler))
-    assert collector.collect_source(db, c, "nhk", URL) == 1
-    assert collector.collect_source(db, c, "nhk", URL) == 0
+    client = mock_client(handler)
+    assert collector.collect_source(db, client, "nhk", FEED_URL) == 3
+    assert collector.collect_source(db, client, "nhk", FEED_URL) == 0
     assert "if-none-match" not in seen[0]
-    assert seen[1]["if-none-match"] == '"e1"'
-    assert seen[1]["if-modified-since"] == "Wed, 01 Jan 2026 00:00:00 GMT"
+    assert seen[1]["if-none-match"] == '"v1"'
+    assert seen[1]["if-modified-since"] == "Sat, 03 Jan 2026 00:00:00 GMT"
+    assert count(db) == 3
+
+
+def test_duplicate_links_never_reinserted(db: Session, mock_client: MockClient, sample_feed: bytes) -> None:
+    client = mock_client(lambda r: httpx.Response(200, content=sample_feed))  # no ETag: full body each time
+    assert collector.collect_source(db, client, "nhk", FEED_URL) == 3  # item A appears twice in the feed
+    assert collector.collect_source(db, client, "nhk", FEED_URL) == 0
+    assert count(db) == 3
+    extra = make_feed(ITEM_A, "<item><title>新着</title><link>https://news.example.test/d</link></item>")
+    client = mock_client(lambda r: httpx.Response(200, content=extra))
+    assert collector.collect_source(db, client, "nhk", FEED_URL) == 1
+    assert count(db) == 4
+
+
+def test_html_stripped_and_summary_truncated(db: Session, mock_client: MockClient, sample_feed: bytes) -> None:
+    collector.collect_source(db, mock_client(lambda r: httpx.Response(200, content=sample_feed)), "nhk", FEED_URL)
+    got = articles(db)
+    assert got["a"].summary == "気象庁は東京などで大雪&強風に注意。"
+    assert len(got["b"].summary) == 300
+    assert got["b"].summary == "あいうえお" * 60
+    for a in got.values():
+        assert "<" not in a.title + a.summary and ">" not in a.title + a.summary
+
+
+def test_http_500_records_error_without_raising(db: Session, mock_client: MockClient) -> None:
+    client = mock_client(lambda r: httpx.Response(500))
+    assert collector.collect_source(db, client, "nhk", FEED_URL) == 0
+    state = db.get(FeedState, "nhk")
+    assert "500" in (state.last_error or "")
+    assert state.last_checked_at is not None
+    assert count(db) == 0
+
+
+def test_network_error_records_error_and_success_clears_it(db: Session, mock_client: MockClient, sample_feed: bytes) -> None:
+    def down(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("down")
+
+    assert collector.collect_source(db, mock_client(down), "nhk", FEED_URL) == 0
+    assert "down" in (db.get(FeedState, "nhk").last_error or "")
+    assert collector.collect_source(db, mock_client(lambda r: httpx.Response(200, content=sample_feed)), "nhk", FEED_URL) == 3
     assert db.get(FeedState, "nhk").last_error is None
 
 
-def test_http_error_recorded_not_raised(db: Session) -> None:
-    c = client_for(httpx.MockTransport(lambda r: httpx.Response(503)))
-    assert collector.collect_source(db, c, "nhk", URL) == 0
-    assert "503" in (db.get(FeedState, "nhk").last_error or "")
+def test_shift_jis_feed_not_garbled(db: Session, mock_client: MockClient) -> None:
+    body = make_feed(ITEM_A, encoding="shift_jis")
+    collector.collect_source(db, mock_client(lambda r: httpx.Response(200, content=body)), "nhk", FEED_URL)
+    assert articles(db)["a"].title == "東京で大雪 交通に影響"
 
 
-def test_network_error_recorded(db: Session) -> None:
-    def boom(req: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("down")
-
-    assert collector.collect_source(db, client_for(httpx.MockTransport(boom)), "nhk", URL) == 0
-    assert "down" in (db.get(FeedState, "nhk").last_error or "")
-
-
-def test_shift_jis_bytes_not_garbled(db: Session) -> None:
-    c = client_for(httpx.MockTransport(lambda r: httpx.Response(200, content=rss(ITEM, "shift_jis"), headers={"Content-Type": "application/xml"})))
-    collector.collect_source(db, c, "nhk", URL)
-    assert db.scalars(select(Article)).one().title == "日本の ニュース & 天気"
-
-
-def test_collect_all_uses_shared_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
+def test_collect_all_shares_one_client(monkeypatch: pytest.MonkeyPatch, engine: Engine, sample_feed: bytes) -> None:
     monkeypatch.setattr(collector, "SessionLocal", lambda: Session(engine))
     monkeypatch.setattr(collector, "FEEDS", {"a": "https://a.test/rss", "b": "https://b.test/rss"})
-    clients: list[httpx.Client] = []
+    used: list[httpx.Client] = []
     orig = collector.collect_source
-
-    def spy(db: Session, client: httpx.Client, source: str, url: str) -> int:
-        clients.append(client)
-        return orig(db, client, source, url)
-
-    monkeypatch.setattr(collector, "collect_source", spy)
-    real_client = httpx.Client
+    monkeypatch.setattr(collector, "collect_source", lambda db, client, s, u: (used.append(client), orig(db, client, s, u))[1])
+    real = httpx.Client
     monkeypatch.setattr(
         collector.httpx, "Client",
-        lambda **kw: real_client(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=rss(ITEM.replace("/1", "/" + r.url.host)))), **kw),
+        lambda **kw: real(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=sample_feed.replace(b"/a<", f"/{r.url.host}<".encode()))), **kw),
     )
-    assert collector.collect_all() == {"a": 1, "b": 1}
-    assert clients[0] is clients[1]
-    assert clients[0].headers["user-agent"] == collector.USER_AGENT
+    # host b returns the same feed except item A's link, so only that one is new
+    assert collector.collect_all() == {"a": 3, "b": 1}
+    assert len(used) == 2 and used[0] is used[1]
+    assert used[0].headers["user-agent"] == collector.USER_AGENT
+
+
+def test_logs_new_count_per_source(db: Session, mock_client: MockClient, sample_feed: bytes, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="app.collector")
+    client = mock_client(lambda r: httpx.Response(200, content=sample_feed))
+    collector.collect_source(db, client, "nhk", FEED_URL)
+    collector.collect_source(db, client, "nhk", FEED_URL)
+    assert "source=nhk new=3" in caplog.text
+    assert "source=nhk new=0" in caplog.text
+
+
+def test_concurrent_insert_does_not_raise(db: Session, mock_client: MockClient, sample_feed: bytes) -> None:
+    """Another process wins the race on the unique link_hash: the final commit fails once."""
+    real_commit = db.commit
+    calls = {"n": 0}
+
+    def commit_once_failing() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed: articles.link_hash"))
+        real_commit()
+
+    db.commit = commit_once_failing  # type: ignore[method-assign]
+    client = mock_client(lambda r: httpx.Response(200, content=sample_feed))
+    assert collector.collect_source(db, client, "nhk", FEED_URL) == 0
+    assert count(db) == 0
+    assert collector.collect_source(db, client, "nhk", FEED_URL) == 3  # picked up on the next run

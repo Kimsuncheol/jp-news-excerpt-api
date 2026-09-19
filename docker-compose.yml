@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-news}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-news}
+      POSTGRES_DB: ${POSTGRES_DB:-news}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Must match the POSTGRES_* values above when overridden.
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://news:news@db:5432/news}
+      ADMIN_KEY: ${ADMIN_KEY:-}
+      USER_AGENT: ${USER_AGENT:-jp-news-excerpt-api/0.1 (+contact: set USER_AGENT)}
+      COLLECT_INTERVAL_MINUTES: ${COLLECT_INTERVAL_MINUTES:-20}
+      # Set to false when running several uvicorn workers/replicas; run app.run_collector instead.
+      ENABLE_SCHEDULER: ${ENABLE_SCHEDULER:-true}
+    ports:
+      - "8000:8000"
+    command: sh -c "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

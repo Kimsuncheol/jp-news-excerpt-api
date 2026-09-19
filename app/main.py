@@ -1,9 +1,10 @@
 import hmac
+import logging
 import threading
-from typing import Annotated
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -12,9 +13,12 @@ from sqlalchemy.orm import Session
 
 from app import config
 from app.collector import collect_all
-from app.db import get_db, init_db
+from app.db import get_db
 from app.models import Article
 from app.schemas import ArticleList, ArticleOut, CollectOut, ErrorOut
+
+config.configure_logging()
+logger = logging.getLogger(__name__)
 
 STARTUP_DELAY_SECONDS = 10
 _collect_lock = threading.Lock()
@@ -32,7 +36,11 @@ def run_collect() -> dict[str, int] | None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    init_db()
+    app.state.scheduler = None
+    if not config.ENABLE_SCHEDULER:
+        logger.info("in-process scheduler disabled (ENABLE_SCHEDULER=false)")
+        yield
+        return
     scheduler = BackgroundScheduler(timezone=timezone.utc)
     scheduler.add_job(
         run_collect,
@@ -45,6 +53,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     scheduler.start()
     app.state.scheduler = scheduler
+    logger.info("scheduler started, collecting every %d minutes", config.COLLECT_INTERVAL_MINUTES)
     try:
         yield
     finally:

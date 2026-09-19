@@ -11,12 +11,19 @@ A FastAPI service that collects Japanese news from RSS feeds (NHK etc.), stores 
 - feedparser (RSS parsing)
 - APScheduler 3.x (periodic collection; do not upgrade to 4.x)
 - pytest
+- Alembic (schema migrations), PostgreSQL in production, SQLite for dev/tests
 
 ## Data rules
 
 - Store only: title, summary excerpt (truncated to at most 300 characters), link, publish date (plus source and internal ids/timestamps as needed).
 - Never store or scrape full article bodies. Use only what the RSS feed provides, and never fetch the article page itself.
 - Always link back to the original article.
+
+## Operations
+
+- Schema changes go through Alembic migrations (`alembic revision --autogenerate`); tables are not created at startup.
+- The collector runs in-process via APScheduler (`ENABLE_SCHEDULER=true`, default) or standalone via `python -m app.run_collector`; disable the scheduler when running multiple uvicorn workers.
+- Runtime dependencies live in `requirements.txt`, test dependencies in `requirements-dev.txt`.
 
 ## Legal / etiquette
 
